@@ -1,0 +1,354 @@
+--- Generates and checks one-time passwords for two-factor sign in.
+---
+--- `otp.hotp` computes the counter codes of RFC 4226 and `otp.totp` the
+--- time codes of RFC 6238, with SHA-1, SHA-256, or SHA-512 and 6 to 8
+--- digits. `otp.verify` accepts a window of time steps for clock drift and
+--- returns the step that matched, so a program can refuse a code that was
+--- already used. Secrets are base32 text, the form that authenticator
+--- apps read, and `otp.uri` builds the `otpauth://` URI behind a QR code.
+---
+--- @package otp
+--- @version 0.1.0
+--- @lus 2.0
+--- @license 0BSD
+--- @repository https://github.com/lus-lang/atmos-otp
+
+local M = {}
+
+local OtpError = {}
+OtpError.__index = OtpError
+OtpError.__tostring = function(e) return e.message end
+
+local function fail(message)
+    error(setmetatable({ message = message }, OtpError), 0)
+end
+
+--- Returns true if `value` is an error object that this package raised.
+---
+--- The error object has a `message`. `base32_decode` raises one for text
+--- that is not base32, and so does every function that reads a secret.
+--- @param value any The value to test.
+--- @return boolean
+function M.iserror(value)
+    return getmetatable(value) == OtpError
+end
+
+-- Base32 -----------------------------------------------------------------------
+
+local ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+local LETTERS = {}
+local VALUES = {}
+for i = 1, 32 do
+    local letter = ALPHABET:sub(i, i)
+    LETTERS[i - 1] = letter
+    VALUES[string.byte(letter)] = i - 1
+    VALUES[string.byte(letter:lower())] = i - 1
+end
+
+--- Encodes bytes in the base32 alphabet of RFC 4648.
+--- @param data vector|string The bytes. A string contributes its WTF-8 bytes.
+--- @param padding boolean? `true` appends `=` up to a multiple of eight characters. The default is `false`, the form that authenticator apps expect.
+--- @return string
+function M.base32_encode(data, padding)
+    local bytes = type(data) == "string" and vector.fromstring(data) or data
+    local n = #bytes
+    local out = {}
+    local acc, bits = 0, 0
+    for i = 0, n - 1 do
+        acc = (acc << 8) | vector.get(bytes, i)
+        bits = bits + 8
+        while bits >= 5 do
+            bits = bits - 5
+            out[#out + 1] = LETTERS[(acc >> bits) & 31]
+        end
+        acc = acc & 31
+    end
+    if bits > 0 then
+        out[#out + 1] = LETTERS[(acc << (5 - bits)) & 31]
+    end
+    if padding then
+        while #out % 8 ~= 0 do
+            out[#out + 1] = "="
+        end
+    end
+    return table.concat(out)
+end
+
+--- Decodes base32 text into bytes.
+---
+--- Letters of either case are accepted. Spaces, hyphens, and trailing `=`
+--- padding are skipped, so a secret typed in groups of four decodes as is.
+--- Any other character raises an error object with the message
+--- `invalid base32 character 'c'`.
+--- @param text string The base32 text.
+--- @return vector
+function M.base32_decode(text)
+    if type(text) ~= "string" then
+        error("bad argument #1 to 'base32_decode' (string expected, got " .. type(text) .. ")", 2)
+    end
+    local out = vector.create((#text * 5) // 8)
+    local acc, bits, size = 0, 0, 0
+    local padded = false
+    for i = 1, #text do
+        local c = string.byte(text, i)
+        local value = VALUES[c]
+        if value == nil then
+            if c == 61 then
+                padded = true
+            elseif c ~= 32 and c ~= 45 then
+                fail(`invalid base32 character '$(text:sub(i, i))'`)
+            end
+            continue
+        end
+        if padded then
+            fail("invalid base32 character '='")
+        end
+        acc = ((acc << 5) | value) & 0xfff
+        bits = bits + 5
+        if bits >= 8 then
+            bits = bits - 8
+            vector.set(out, size, (acc >> bits) & 255)
+            size = size + 1
+        end
+    end
+    vector.resize(out, size)
+    return out
+end
+
+--- Returns a new random secret as base32 text.
+--- @param bytes integer? The number of random bytes, 20 by default, which is the size that RFC 4226 recommends and gives 32 characters.
+--- @return string
+function M.secret(bytes)
+    bytes = bytes or 20
+    if math.type(bytes) ~= "integer" or bytes < 1 then
+        error("bad argument #1 to 'secret' (positive integer expected)", 2)
+    end
+    return M.base32_encode(crypto.random(bytes))
+end
+
+-- Codes ------------------------------------------------------------------------
+
+local ALGORITHMS = { sha1 = "SHA1", sha256 = "SHA256", sha512 = "SHA512" }
+local POWERS = { [6] = 1000000, [7] = 10000000, [8] = 100000000 }
+
+local function key_of(secret)
+    if type(secret) == "string" then
+        local key = M.base32_decode(secret)
+        if #key == 0 then
+            fail("empty secret")
+        end
+        return key
+    end
+    return secret
+end
+
+-- Reads the options shared by every function: the algorithm and the digits.
+local function settings(options)
+    local algorithm = options and options.algorithm or "sha1"
+    if ALGORITHMS[algorithm] == nil then
+        error(`unknown algorithm '$(tostring(algorithm))'`, 3)
+    end
+    local digits = options and options.digits or 6
+    if POWERS[digits] == nil then
+        error("digits must be 6, 7, or 8", 3)
+    end
+    return algorithm, digits
+end
+
+local counter_bytes = vector.create(8)
+
+local function generate(key, counter, algorithm, digits)
+    vector.pack(counter_bytes, 0, ">I8", counter)
+    local mac = crypto.hmac(algorithm, key, counter_bytes)
+    local offset = vector.get(mac, #mac - 1) & 15
+    local value = vector.unpack(mac, offset, ">I4") & 0x7fffffff
+    return string.format("%0" .. digits .. "d", value % POWERS[digits])
+end
+
+local function seconds_of(value)
+    if value == nil then
+        return time.now():epoch()
+    end
+    if type(value) == "number" then
+        return math.floor(value)
+    end
+    return value:epoch()
+end
+
+local function step_of(options)
+    local period = options and options.period or 30
+    if math.type(period) ~= "integer" or period < 1 then
+        error("period must be a positive integer", 3)
+    end
+    return seconds_of(options and options.time) // period, period
+end
+
+-- Leaves only the digits that a person typed, without the spaces of a
+-- grouped code.
+local function clean(code)
+    if type(code) == "number" then
+        code = tostring(code)
+    end
+    if type(code) ~= "string" then
+        return nil
+    end
+    return (code:gsub("%s", ""))
+end
+
+--- Returns the HOTP code of a counter, as defined by RFC 4226.
+---
+--- An invalid secret raises an error object. An unknown algorithm, a digit
+--- count outside 6 to 8, and a negative counter raise a plain error.
+--- @param secret string|vector The shared secret, as base32 text or as a vector of raw bytes.
+--- @param counter integer The counter, zero or more.
+--- @param options table? `digits` is the length of the code, 6 by default. `algorithm` is `"sha1"` by default, or `"sha256"` or `"sha512"`.
+--- @return string The code, with its leading zeros.
+function M.hotp(secret, counter, options)
+    local algorithm, digits = settings(options)
+    if math.type(counter) ~= "integer" or counter < 0 then
+        error("bad argument #2 to 'hotp' (non-negative integer expected)", 2)
+    end
+    return generate(key_of(secret), counter, algorithm, digits)
+end
+
+--- Returns the TOTP code of a point in time, as defined by RFC 6238.
+---
+--- The errors are those of `otp.hotp`.
+--- @param secret string|vector The shared secret, as base32 text or as a vector of raw bytes.
+--- @param options table? `time` is an instant or a count of Unix seconds, and defaults to now. `period` is the length of a time step in seconds, 30 by default. `digits` and `algorithm` are those of `otp.hotp`.
+--- @return string The code, with its leading zeros.
+function M.totp(secret, options)
+    local algorithm, digits = settings(options)
+    local step = step_of(options)
+    return generate(key_of(secret), step, algorithm, digits)
+end
+
+local function search(key, code, first, last, center, algorithm, digits)
+    local found = nil
+    -- Every candidate is compared, so the running time is the same for a
+    -- match at any offset and for no match.
+    for counter = first, last do
+        if counter >= 0 and crypto.equal(generate(key, counter, algorithm, digits), code) and found == nil then
+            found = counter
+        end
+    end
+    if found == nil then
+        return nil
+    end
+    return found - center, found
+end
+
+--- Checks a TOTP code and returns the time step that it matches.
+---
+--- The code is compared in constant time with the code of the current time
+--- step and of `window` steps on each side. A match returns the offset of
+--- its step, 0 for the current one, and the step itself, which is the Unix
+--- time divided by the period. A program that stores the last accepted
+--- step and refuses any step at or below it accepts each code only once.
+--- A code of the wrong length or with other characters matches nothing.
+--- The errors are those of `otp.hotp`.
+--- @param secret string|vector The shared secret, as base32 text or as a vector of raw bytes.
+--- @param code string|integer The code to check. Spaces are ignored.
+--- @param options table? `window` is the number of steps accepted on each side, 1 by default. `time`, `period`, `digits`, and `algorithm` are those of `otp.totp`.
+--- @return integer|nil The offset of the matching step, or `nil` when the code matches no step.
+--- @return integer|nil The matching step.
+function M.verify(secret, code, options)
+    local algorithm, digits = settings(options)
+    local step = step_of(options)
+    local window = options and options.window or 1
+    if math.type(window) ~= "integer" or window < 0 then
+        error("window must be a non-negative integer", 2)
+    end
+    local key = key_of(secret)
+    code = clean(code)
+    if code == nil or #code ~= digits then
+        return nil
+    end
+    return search(key, code, step - window, step + window, step, algorithm, digits)
+end
+
+--- Checks an HOTP code and returns the counter that it matches.
+---
+--- The code is compared in constant time with the code of `counter` and of
+--- the `window` counters after it, which covers codes that the device
+--- generated and the user never sent. A match returns its distance from
+--- `counter` and the matching counter. The server then stores that counter
+--- plus one. The errors are those of `otp.hotp`.
+--- @param secret string|vector The shared secret, as base32 text or as a vector of raw bytes.
+--- @param code string|integer The code to check. Spaces are ignored.
+--- @param counter integer The next counter that the server expects.
+--- @param options table? `window` is the number of later counters accepted, 0 by default. `digits` and `algorithm` are those of `otp.hotp`.
+--- @return integer|nil The distance of the matching counter from `counter`, or `nil` when the code matches none.
+--- @return integer|nil The matching counter.
+function M.verify_hotp(secret, code, counter, options)
+    local algorithm, digits = settings(options)
+    if math.type(counter) ~= "integer" or counter < 0 then
+        error("bad argument #3 to 'verify_hotp' (non-negative integer expected)", 2)
+    end
+    local window = options and options.window or 0
+    if math.type(window) ~= "integer" or window < 0 then
+        error("window must be a non-negative integer", 2)
+    end
+    local key = key_of(secret)
+    code = clean(code)
+    if code == nil or #code ~= digits then
+        return nil
+    end
+    return search(key, code, counter, counter + window, counter, algorithm, digits)
+end
+
+--- Returns the seconds left before the current TOTP code changes.
+--- @param options table? `time` and `period` are those of `otp.totp`.
+--- @return integer A number from 1 to the period.
+function M.remaining(options)
+    local step, period = step_of(options)
+    return (step + 1) * period - seconds_of(options and options.time)
+end
+
+-- URIs -------------------------------------------------------------------------
+
+local function escape(text)
+    return string.transcode(tostring(text), "utf-8", "url")
+end
+
+--- Builds the `otpauth://` URI that authenticator apps read from a QR code.
+---
+--- The label is the issuer and the account, each percent-encoded and
+--- joined by a colon. The query carries the secret without padding, the
+--- issuer, the algorithm, the digits, and the period of a TOTP secret or
+--- the counter of an HOTP secret. An invalid secret raises an error object.
+--- A missing account raises a plain error.
+--- @param secret string|vector The shared secret, as base32 text or as a vector of raw bytes.
+--- @param options table `account` names the user and is required. `issuer` names the service. `type` is `"totp"` by default or `"hotp"`. `counter` is the first counter of an HOTP secret, 0 by default. `period`, `digits`, and `algorithm` are those of `otp.totp`.
+--- @return string
+function M.uri(secret, options)
+    if type(options) ~= "table" or options.account == nil then
+        error("otp.uri needs an account", 2)
+    end
+    local algorithm, digits = settings(options)
+    local kind = options.type or "totp"
+    if kind ~= "totp" and kind ~= "hotp" then
+        error(`unknown type '$(tostring(kind))'`, 2)
+    end
+    local label = escape(options.account)
+    local query = { "secret=" .. M.base32_encode(key_of(secret)) }
+    if options.issuer ~= nil then
+        label = escape(options.issuer) .. ":" .. label
+        query[#query + 1] = "issuer=" .. escape(options.issuer)
+    end
+    query[#query + 1] = "algorithm=" .. ALGORITHMS[algorithm]
+    query[#query + 1] = "digits=" .. digits
+    if kind == "totp" then
+        local _, period = step_of(options)
+        query[#query + 1] = "period=" .. period
+    else
+        local counter = options.counter or 0
+        if math.type(counter) ~= "integer" or counter < 0 then
+            error("counter must be a non-negative integer", 2)
+        end
+        query[#query + 1] = "counter=" .. counter
+    end
+    return "otpauth://" .. kind .. "/" .. label .. "?" .. table.concat(query, "&")
+end
+
+return M

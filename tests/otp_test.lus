@@ -1,0 +1,249 @@
+local ROOT = string.match(TEST_DIR, "^(.*)[/\\][^/\\]*$")
+pledge("load", "fs:read=" .. ROOT .. "/*")
+package.path = ROOT .. "/?.lus;" .. package.path
+
+local otp = require("otp")
+
+local SHA1_KEY = vector.fromstring("12345678901234567890")
+local SHA256_KEY = vector.fromstring("12345678901234567890123456789012")
+local SHA512_KEY = vector.fromstring("1234567890123456789012345678901234567890123456789012345678901234")
+local SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+-- Base32 -----------------------------------------------------------------------
+
+local base32_cases = {
+    { name = "empty", "", "" },
+    { name = "f", "f", "MY======" },
+    { name = "fo", "fo", "MZXQ====" },
+    { name = "foo", "foo", "MZXW6===" },
+    { name = "foob", "foob", "MZXW6YQ=" },
+    { name = "fooba", "fooba", "MZXW6YTB" },
+    { name = "foobar", "foobar", "MZXW6YTBOI======" },
+}
+
+local function base32_rfc4648_test()
+    for _, case in ipairs(base32_cases) do
+        assert(otp.base32_encode(case[1], true) == case[2], case.name)
+        assert(vector.tostring(otp.base32_decode(case[2])) == case[1], case.name)
+        local bare = case[2]:gsub("=", "")
+        assert(otp.base32_encode(case[1]) == bare, case.name)
+        assert(vector.tostring(otp.base32_decode(bare)) == case[1], case.name)
+    end
+end
+
+local function base32_lenient_test()
+    assert(vector.tostring(otp.base32_decode("mzxw 6ytb-oi")) == "foobar")
+    assert(otp.base32_encode(SHA1_KEY) == SECRET)
+end
+
+local function base32_binary_test()
+    local bytes = vector.create(256)
+    for i = 0, 255 do
+        vector.set(bytes, i, i)
+    end
+    local back = otp.base32_decode(otp.base32_encode(bytes))
+    assert(#back == 256)
+    for i = 0, 255 do
+        assert(vector.get(back, i) == i)
+    end
+end
+
+local function base32_invalid_test()
+    local err = raises(function() otp.base32_decode("MZXW1") end, "invalid base32 character '1'")
+    assert(otp.iserror(err))
+    assert(err.message == "invalid base32 character '1'")
+    raises(function() otp.base32_decode("MY==MY") end, "invalid base32 character '='")
+    raises(function() otp.base32_decode(12) end, "string expected")
+    assert(not otp.iserror("text"))
+end
+
+local function secret_test()
+    local a, b = otp.secret(), otp.secret()
+    assert(#a == 32 and a:match("^[A-Z2-7]+$"))
+    assert(a ~= b)
+    assert(#otp.base32_decode(a) == 20)
+    assert(#otp.base32_decode(otp.secret(32)) == 32)
+    raises(function() otp.secret(0) end, "positive integer")
+end
+
+-- HOTP -------------------------------------------------------------------------
+
+local function hotp_rfc4226_test()
+    local expected = {
+        "755224", "287082", "359152", "969429", "338314",
+        "254676", "287922", "162583", "399871", "520489",
+    }
+    for i, code in ipairs(expected) do
+        assert(otp.hotp(SHA1_KEY, i - 1) == code)
+        assert(otp.hotp(SECRET, i - 1) == code)
+    end
+end
+
+local function hotp_digits_test()
+    assert(#otp.hotp(SECRET, 0, { digits = 8 }) == 8)
+    assert(otp.hotp(SECRET, 0, { digits = 8 }):sub(3) == "755224")
+    assert(otp.hotp(SECRET, 0, { digits = 7 }):sub(2) == "755224")
+end
+
+local function hotp_arguments_test()
+    raises(function() otp.hotp(SECRET, -1) end, "non%-negative integer")
+    raises(function() otp.hotp(SECRET, 1.5) end, "non%-negative integer")
+    raises(function() otp.hotp(SECRET, 0, { digits = 5 }) end, "digits must be")
+    raises(function() otp.hotp(SECRET, 0, { algorithm = "md5" }) end, "unknown algorithm 'md5'")
+    assert(otp.iserror(raises(function() otp.hotp("not base32!", 0) end, "invalid base32")))
+    assert(otp.iserror(raises(function() otp.hotp("", 0) end, "empty secret")))
+end
+
+local function verify_hotp_test()
+    local offset, counter = otp.verify_hotp(SECRET, "755224", 0)
+    assert(offset == 0 and counter == 0)
+    assert(otp.verify_hotp(SECRET, "969429", 0) == nil)
+    offset, counter = otp.verify_hotp(SECRET, "969429", 0, { window = 5 })
+    assert(offset == 3 and counter == 3)
+    offset, counter = otp.verify_hotp(SECRET, "520489", 7, { window = 2 })
+    assert(offset == 2 and counter == 9)
+    -- A counter before the expected one never matches.
+    assert(otp.verify_hotp(SECRET, "755224", 1, { window = 5 }) == nil)
+end
+
+-- TOTP -------------------------------------------------------------------------
+
+local totp_cases = {
+    { 59, "94287082", "46119246", "90693936" },
+    { 1111111109, "07081804", "68084774", "25091201" },
+    { 1111111111, "14050471", "67062674", "99943326" },
+    { 1234567890, "89005924", "91819424", "93441116" },
+    { 2000000000, "69279037", "90698825", "38618901" },
+    { 20000000000, "65353130", "77737706", "47863826" },
+}
+
+local function totp_rfc6238_sha1_test()
+    for _, case in ipairs(totp_cases) do
+        assert(otp.totp(SHA1_KEY, { time = case[1], digits = 8 }) == case[2])
+    end
+end
+
+local function totp_rfc6238_sha256_test()
+    for _, case in ipairs(totp_cases) do
+        assert(otp.totp(SHA256_KEY, { time = case[1], digits = 8, algorithm = "sha256" }) == case[3])
+    end
+end
+
+local function totp_rfc6238_sha512_test()
+    for _, case in ipairs(totp_cases) do
+        assert(otp.totp(SHA512_KEY, { time = case[1], digits = 8, algorithm = "sha512" }) == case[4])
+    end
+end
+
+local function totp_instant_test()
+    local at = time.instant(1111111109, 500000000)
+    assert(otp.totp(SECRET, { time = at, digits = 8 }) == "07081804")
+    assert(otp.totp(SECRET, { time = 1111111109.9, digits = 8 }) == "07081804")
+    assert(otp.totp(SECRET, { time = 59 }) == "287082")
+end
+
+local function totp_period_test()
+    -- Step 1 of a 60 second period is counter 1 of the HOTP vectors.
+    assert(otp.totp(SECRET, { time = 60, period = 60 }) == "287082")
+    assert(otp.totp(SECRET, { time = 119, period = 60 }) == "287082")
+    assert(otp.totp(SECRET, { time = 120, period = 60 }) == "359152")
+    raises(function() otp.totp(SECRET, { period = 0 }) end, "period must be")
+end
+
+local function totp_now_test()
+    local code = otp.totp(SECRET)
+    assert(#code == 6 and code:match("^%d+$"))
+    local offset = otp.verify(SECRET, code)
+    assert(offset == 0 or offset == -1)
+end
+
+local function verify_current_test()
+    local offset, step = otp.verify(SECRET, "287082", { time = 59 })
+    assert(offset == 0 and step == 1)
+    assert(otp.verify(SECRET, 287082, { time = 59 }) == 0)
+    assert(otp.verify(SECRET, "287 082", { time = 59 }) == 0)
+end
+
+local function verify_window_test()
+    local offset, step = otp.verify(SECRET, "755224", { time = 59 })
+    assert(offset == -1 and step == 0)
+    offset, step = otp.verify(SECRET, "359152", { time = 59 })
+    assert(offset == 1 and step == 2)
+    assert(otp.verify(SECRET, "969429", { time = 59 }) == nil)
+    offset, step = otp.verify(SECRET, "969429", { time = 59, window = 2 })
+    assert(offset == 2 and step == 3)
+    assert(otp.verify(SECRET, "755224", { time = 59, window = 0 }) == nil)
+    raises(function() otp.verify(SECRET, "755224", { window = -1 }) end, "window must be")
+end
+
+local function verify_rejects_test()
+    assert(otp.verify(SECRET, "28708", { time = 59 }) == nil)
+    assert(otp.verify(SECRET, "0287082", { time = 59 }) == nil)
+    assert(otp.verify(SECRET, "28708x", { time = 59 }) == nil)
+    assert(otp.verify(SECRET, "", { time = 59 }) == nil)
+    assert(otp.verify(SECRET, nil, { time = 59 }) == nil)
+    -- The window never reaches a step before the epoch.
+    assert(otp.verify(SECRET, "755224", { time = 0, window = 3 }) == 0)
+end
+
+local function verify_reuse_test()
+    -- The caller keeps the last accepted step and refuses it afterwards.
+    local last = -1
+    local function accept(code, now)
+        local offset, step = otp.verify(SECRET, code, { time = now })
+        if offset == nil or step <= last then
+            return false
+        end
+        last = step
+        return true
+    end
+    assert(accept("287082", 59))
+    assert(not accept("287082", 59))
+    assert(not accept("755224", 59))
+    assert(accept("359152", 61))
+end
+
+local function verify_algorithm_test()
+    local options = { time = 1234567890, digits = 8, algorithm = "sha512" }
+    assert(otp.verify(SHA512_KEY, "93441116", options) == 0)
+    assert(otp.verify(SHA512_KEY, "89005924", options) == nil)
+end
+
+local function remaining_test()
+    assert(otp.remaining({ time = 0 }) == 30)
+    assert(otp.remaining({ time = 29 }) == 1)
+    assert(otp.remaining({ time = 30 }) == 30)
+    assert(otp.remaining({ time = 61, period = 60 }) == 59)
+    local left = otp.remaining()
+    assert(left >= 1 and left <= 30)
+end
+
+-- URIs -------------------------------------------------------------------------
+
+local function uri_totp_test()
+    local uri = otp.uri(SECRET, { issuer = "App", account = "ada@example.com" })
+    assert(uri == "otpauth://totp/App:ada%40example.com?secret=" .. SECRET
+        .. "&issuer=App&algorithm=SHA1&digits=6&period=30")
+end
+
+local function uri_escape_test()
+    local uri = otp.uri(SECRET, { issuer = "Big Corp & Co", account = "a:b/c d" })
+    assert(uri:find("otpauth://totp/Big%20Corp%20%26%20Co:a%3Ab%2Fc%20d?", 1, true) == 1)
+    assert(uri:find("&issuer=Big%20Corp%20%26%20Co&", 1, true))
+    local accent = otp.uri(SECRET, { account = "zo\u{e9}" })
+    assert(accent:find("otpauth://totp/zo%C3%A9?secret=", 1, true) == 1)
+    assert(not accent:find("issuer", 1, true))
+end
+
+local function uri_options_test()
+    local uri = otp.uri(SHA1_KEY, { account = "ada", algorithm = "sha256", digits = 8, period = 60 })
+    assert(uri == "otpauth://totp/ada?secret=" .. SECRET .. "&algorithm=SHA256&digits=8&period=60")
+    local hotp = otp.uri("gezd gnbv gy3t qojq gezd gnbv gy3t qojq", { type = "hotp", account = "ada", counter = 7 })
+    assert(hotp == "otpauth://hotp/ada?secret=" .. SECRET .. "&algorithm=SHA1&digits=6&counter=7")
+end
+
+local function uri_arguments_test()
+    raises(function() otp.uri(SECRET, {}) end, "needs an account")
+    raises(function() otp.uri(SECRET) end, "needs an account")
+    raises(function() otp.uri(SECRET, { account = "a", type = "x" }) end, "unknown type 'x'")
+end
