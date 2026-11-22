@@ -1,6 +1,6 @@
 local ROOT = string.match(TEST_DIR, "^(.*)[/\\][^/\\]*$")
-pledge("load", "fs:read=" .. ROOT .. "/*")
-package.path = ROOT .. "/?.lus;" .. package.path
+pledge("load", `fs:read=$ROOT/*`)
+package.path = `$ROOT/?.lus;$(package.path)`
 
 local otp = require("otp")
 
@@ -222,8 +222,7 @@ end
 
 local function uri_totp_test()
     local uri = otp.uri(SECRET, { issuer = "App", account = "ada@example.com" })
-    assert(uri == "otpauth://totp/App:ada%40example.com?secret=" .. SECRET
-        .. "&issuer=App&algorithm=SHA1&digits=6&period=30")
+    assert(uri == `otpauth://totp/App:ada%40example.com?secret=$SECRET&issuer=App&algorithm=SHA1&digits=6&period=30`)
 end
 
 local function uri_escape_test()
@@ -237,9 +236,9 @@ end
 
 local function uri_options_test()
     local uri = otp.uri(SHA1_KEY, { account = "ada", algorithm = "sha256", digits = 8, period = 60 })
-    assert(uri == "otpauth://totp/ada?secret=" .. SECRET .. "&algorithm=SHA256&digits=8&period=60")
+    assert(uri == `otpauth://totp/ada?secret=$SECRET&algorithm=SHA256&digits=8&period=60`)
     local hotp = otp.uri("gezd gnbv gy3t qojq gezd gnbv gy3t qojq", { type = "hotp", account = "ada", counter = 7 })
-    assert(hotp == "otpauth://hotp/ada?secret=" .. SECRET .. "&algorithm=SHA1&digits=6&counter=7")
+    assert(hotp == `otpauth://hotp/ada?secret=$SECRET&algorithm=SHA1&digits=6&counter=7`)
 end
 
 local function uri_arguments_test()

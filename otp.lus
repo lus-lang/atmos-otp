@@ -5,10 +5,10 @@
 --- digits. `otp.verify` accepts a window of time steps for clock drift and
 --- returns the step that matched, so a program can refuse a code that was
 --- already used. Secrets are base32 text, the form that authenticator
---- apps read, and `otp.uri` builds the `otpauth://` URI behind a QR code.
+--- apps read. `otp.uri` builds the `otpauth://` URI that a QR code encodes.
 ---
 --- @package otp
---- @version 0.1.0
+--- @version 1.0.0
 --- @lus 2.0
 --- @license 0BSD
 --- @repository https://github.com/lus-lang/atmos-otp
@@ -25,8 +25,8 @@ end
 
 --- Returns true if `value` is an error object that this package raised.
 ---
---- The error object has a `message`. `base32_decode` raises one for text
---- that is not base32, and so does every function that reads a secret.
+--- The error object has a `message`. `base32_decode` and every function
+--- that reads a secret raise one for text that is not base32.
 --- @param value any The value to test.
 --- @return boolean
 function M.iserror(value)
@@ -35,43 +35,18 @@ end
 
 -- Base32 -----------------------------------------------------------------------
 
-local ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-local LETTERS = {}
-local VALUES = {}
-for i = 1, 32 do
-    local letter = ALPHABET:sub(i, i)
-    LETTERS[i - 1] = letter
-    VALUES[string.byte(letter)] = i - 1
-    VALUES[string.byte(letter:lower())] = i - 1
-end
+local transcode = string.transcode
 
 --- Encodes bytes in the base32 alphabet of RFC 4648.
 --- @param data vector|string The bytes. A string contributes its WTF-8 bytes.
 --- @param padding boolean? `true` appends `=` up to a multiple of eight characters. The default is `false`, the form that authenticator apps expect.
 --- @return string
 function M.base32_encode(data, padding)
-    local bytes = type(data) == "string" and vector.fromstring(data) or data
-    local n = #bytes
-    local out = {}
-    local acc, bits = 0, 0
-    for i = 0, n - 1 do
-        acc = (acc << 8) | vector.get(bytes, i)
-        bits = bits + 8
-        while bits >= 5 do
-            bits = bits - 5
-            out[#out + 1] = LETTERS[(acc >> bits) & 31]
-        end
-        acc = acc & 31
-    end
-    if bits > 0 then
-        out[#out + 1] = LETTERS[(acc << (5 - bits)) & 31]
-    end
+    local text = transcode(data, "binary", "base32")
     if padding then
-        while #out % 8 ~= 0 do
-            out[#out + 1] = "="
-        end
+        return text
     end
-    return table.concat(out)
+    return (text:gsub("=+$", ""))
 end
 
 --- Decodes base32 text into bytes.
@@ -84,35 +59,26 @@ end
 --- @return vector
 function M.base32_decode(text)
     if type(text) ~= "string" then
-        error("bad argument #1 to 'base32_decode' (string expected, got " .. type(text) .. ")", 2)
+        error(`bad argument #1 to 'base32_decode' (string expected, got $(type(text)))`, 2)
     end
-    local out = vector.create((#text * 5) // 8)
-    local acc, bits, size = 0, 0, 0
-    local padded = false
-    for i = 1, #text do
-        local c = string.byte(text, i)
-        local value = VALUES[c]
-        if value == nil then
-            if c == 61 then
-                padded = true
-            elseif c ~= 32 and c ~= 45 then
-                fail(`invalid base32 character '$(text:sub(i, i))'`)
-            end
-            continue
-        end
-        if padded then
+    if text:find("[ %-]") then
+        text = text:gsub("[ %-]", "")
+    end
+    local digits = text:match("^([A-Za-z2-7]*)=*$")
+    if digits == nil then
+        local bad = text:find("[^A-Za-z2-7=]")
+        local after = text:find("[A-Za-z2-7]", text:find("=", 1, true) or #text + 1)
+        if after and (bad == nil or after < bad) then
             fail("invalid base32 character '='")
         end
-        acc = ((acc << 5) | value) & 0xfff
-        bits = bits + 5
-        if bits >= 8 then
-            bits = bits - 8
-            vector.set(out, size, (acc >> bits) & 255)
-            size = size + 1
-        end
+        fail(`invalid base32 character '$(text:sub(bad, bad))'`)
     end
-    vector.resize(out, size)
-    return out
+    -- A final character that completes no byte carries no data.
+    local tail = #digits % 8
+    if tail == 1 or tail == 3 or tail == 6 then
+        digits = digits:sub(1, -2)
+    end
+    return transcode(digits, "base32", "binary")
 end
 
 --- Returns a new random secret as base32 text.
@@ -162,7 +128,7 @@ local function generate(key, counter, algorithm, digits)
     local mac = crypto.hmac(algorithm, key, counter_bytes)
     local offset = vector.get(mac, #mac - 1) & 15
     local value = vector.unpack(mac, offset, ">I4") & 0x7fffffff
-    return string.format("%0" .. digits .. "d", value % POWERS[digits])
+    return string.format(`%0$(digits)d`, value % POWERS[digits])
 end
 
 local function seconds_of(value)
@@ -215,7 +181,7 @@ end
 ---
 --- The errors are those of `otp.hotp`.
 --- @param secret string|vector The shared secret, as base32 text or as a vector of raw bytes.
---- @param options table? `time` is an instant or a count of Unix seconds, and defaults to now. `period` is the length of a time step in seconds, 30 by default. `digits` and `algorithm` are those of `otp.hotp`.
+--- @param options table? `time` is an instant or a count of Unix seconds and defaults to now. `period` is the length of a time step in seconds, 30 by default. `digits` and `algorithm` are those of `otp.hotp`.
 --- @return string The code, with its leading zeros.
 function M.totp(secret, options)
     local algorithm, digits = settings(options)
@@ -241,11 +207,11 @@ end
 --- Checks a TOTP code and returns the time step that it matches.
 ---
 --- The code is compared in constant time with the code of the current time
---- step and of `window` steps on each side. A match returns the offset of
---- its step, 0 for the current one, and the step itself, which is the Unix
---- time divided by the period. A program that stores the last accepted
---- step and refuses any step at or below it accepts each code only once.
---- A code of the wrong length or with other characters matches nothing.
+--- step and of `window` steps on each side. A match returns the offset of its
+--- step and the step itself. The offset is 0 for the current step. The step
+--- is the Unix time divided by the period. A program that stores the last
+--- accepted step and refuses any step at or below it accepts each code only
+--- once. A code of the wrong length or with other characters matches nothing.
 --- The errors are those of `otp.hotp`.
 --- @param secret string|vector The shared secret, as base32 text or as a vector of raw bytes.
 --- @param code string|integer The code to check. Spaces are ignored.
@@ -314,7 +280,7 @@ end
 --- Builds the `otpauth://` URI that authenticator apps read from a QR code.
 ---
 --- The label is the issuer and the account, each percent-encoded and
---- joined by a colon. The query carries the secret without padding, the
+--- joined by a colon. The query contains the secret without padding, the
 --- issuer, the algorithm, the digits, and the period of a TOTP secret or
 --- the counter of an HOTP secret. An invalid secret raises an error object.
 --- A missing account raises a plain error.
@@ -333,7 +299,7 @@ function M.uri(secret, options)
     local label = escape(options.account)
     local query = { "secret=" .. M.base32_encode(key_of(secret)) }
     if options.issuer ~= nil then
-        label = escape(options.issuer) .. ":" .. label
+        label = `$(escape(options.issuer)):$label`
         query[#query + 1] = "issuer=" .. escape(options.issuer)
     end
     query[#query + 1] = "algorithm=" .. ALGORITHMS[algorithm]
@@ -348,7 +314,7 @@ function M.uri(secret, options)
         end
         query[#query + 1] = "counter=" .. counter
     end
-    return "otpauth://" .. kind .. "/" .. label .. "?" .. table.concat(query, "&")
+    return `otpauth://$kind/$label?$(table.concat(query, "&"))`
 end
 
 return M
