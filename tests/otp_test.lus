@@ -6,7 +6,9 @@ local otp = require("otp")
 
 local SHA1_KEY = vector.fromstring("12345678901234567890")
 local SHA256_KEY = vector.fromstring("12345678901234567890123456789012")
-local SHA512_KEY = vector.fromstring("1234567890123456789012345678901234567890123456789012345678901234")
+local SHA512_KEY = vector.fromstring(
+    "1234567890123456789012345678901234567890123456789012345678901234"
+)
 local SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
 
 -- Base32 -----------------------------------------------------------------------
@@ -38,22 +40,35 @@ end
 
 local function base32_binary_test()
     local bytes = vector.create(256)
+
     for i = 0, 255 do
         vector.set(bytes, i, i)
     end
+
     local back = otp.base32_decode(otp.base32_encode(bytes))
     assert(#back == 256)
+
     for i = 0, 255 do
         assert(vector.get(back, i) == i)
     end
 end
 
 local function base32_invalid_test()
-    local err = raises(function() otp.base32_decode("MZXW1") end, "invalid base32 character '1'")
+    local err = raises(function()
+        otp.base32_decode("MZXW1")
+    end, "invalid base32 character '1'")
+
     assert(otp.iserror(err))
     assert(err.message == "invalid base32 character '1'")
-    raises(function() otp.base32_decode("MY==MY") end, "invalid base32 character '='")
-    raises(function() otp.base32_decode(12) end, "string expected")
+
+    raises(function()
+        otp.base32_decode("MY==MY")
+    end, "invalid base32 character '='")
+
+    raises(function()
+        otp.base32_decode(12)
+    end, "string expected")
+
     assert(not otp.iserror("text"))
 end
 
@@ -63,16 +78,28 @@ local function secret_test()
     assert(a ~= b)
     assert(#otp.base32_decode(a) == 20)
     assert(#otp.base32_decode(otp.secret(32)) == 32)
-    raises(function() otp.secret(0) end, "positive integer")
+
+    raises(function()
+        otp.secret(0)
+    end, "positive integer")
 end
 
 -- HOTP -------------------------------------------------------------------------
 
 local function hotp_rfc4226_test()
     local expected = {
-        "755224", "287082", "359152", "969429", "338314",
-        "254676", "287922", "162583", "399871", "520489",
+        "755224",
+        "287082",
+        "359152",
+        "969429",
+        "338314",
+        "254676",
+        "287922",
+        "162583",
+        "399871",
+        "520489",
     }
+
     for i, code in ipairs(expected) do
         assert(otp.hotp(SHA1_KEY, i - 1) == code)
         assert(otp.hotp(SECRET, i - 1) == code)
@@ -86,12 +113,29 @@ local function hotp_digits_test()
 end
 
 local function hotp_arguments_test()
-    raises(function() otp.hotp(SECRET, -1) end, "non%-negative integer")
-    raises(function() otp.hotp(SECRET, 1.5) end, "non%-negative integer")
-    raises(function() otp.hotp(SECRET, 0, { digits = 5 }) end, "digits must be")
-    raises(function() otp.hotp(SECRET, 0, { algorithm = "md5" }) end, "unknown algorithm 'md5'")
-    assert(otp.iserror(raises(function() otp.hotp("not base32!", 0) end, "invalid base32")))
-    assert(otp.iserror(raises(function() otp.hotp("", 0) end, "empty secret")))
+    raises(function()
+        otp.hotp(SECRET, -1)
+    end, "non%-negative integer")
+
+    raises(function()
+        otp.hotp(SECRET, 1.5)
+    end, "non%-negative integer")
+
+    raises(function()
+        otp.hotp(SECRET, 0, { digits = 5 })
+    end, "digits must be")
+
+    raises(function()
+        otp.hotp(SECRET, 0, { algorithm = "md5" })
+    end, "unknown algorithm 'md5'")
+
+    assert(otp.iserror(raises(function()
+        otp.hotp("not base32!", 0)
+    end, "invalid base32")))
+
+    assert(otp.iserror(raises(function()
+        otp.hotp("", 0)
+    end, "empty secret")))
 end
 
 local function verify_hotp_test()
@@ -125,13 +169,17 @@ end
 
 local function totp_rfc6238_sha256_test()
     for _, case in ipairs(totp_cases) do
-        assert(otp.totp(SHA256_KEY, { time = case[1], digits = 8, algorithm = "sha256" }) == case[3])
+        assert(
+            otp.totp(SHA256_KEY, { time = case[1], digits = 8, algorithm = "sha256" }) == case[3]
+        )
     end
 end
 
 local function totp_rfc6238_sha512_test()
     for _, case in ipairs(totp_cases) do
-        assert(otp.totp(SHA512_KEY, { time = case[1], digits = 8, algorithm = "sha512" }) == case[4])
+        assert(
+            otp.totp(SHA512_KEY, { time = case[1], digits = 8, algorithm = "sha512" }) == case[4]
+        )
     end
 end
 
@@ -147,7 +195,10 @@ local function totp_period_test()
     assert(otp.totp(SECRET, { time = 60, period = 60 }) == "287082")
     assert(otp.totp(SECRET, { time = 119, period = 60 }) == "287082")
     assert(otp.totp(SECRET, { time = 120, period = 60 }) == "359152")
-    raises(function() otp.totp(SECRET, { period = 0 }) end, "period must be")
+
+    raises(function()
+        otp.totp(SECRET, { period = 0 })
+    end, "period must be")
 end
 
 local function totp_now_test()
@@ -173,7 +224,10 @@ local function verify_window_test()
     offset, step = otp.verify(SECRET, "969429", { time = 59, window = 2 })
     assert(offset == 2 and step == 3)
     assert(otp.verify(SECRET, "755224", { time = 59, window = 0 }) == nil)
-    raises(function() otp.verify(SECRET, "755224", { window = -1 }) end, "window must be")
+
+    raises(function()
+        otp.verify(SECRET, "755224", { window = -1 })
+    end, "window must be")
 end
 
 local function verify_rejects_test()
@@ -189,14 +243,18 @@ end
 local function verify_reuse_test()
     -- The caller keeps the last accepted step and refuses it afterwards.
     local last = -1
+
     local function accept(code, now)
         local offset, step = otp.verify(SECRET, code, { time = now })
+
         if offset == nil or step <= last then
             return false
         end
+
         last = step
         return true
     end
+
     assert(accept("287082", 59))
     assert(not accept("287082", 59))
     assert(not accept("755224", 59))
@@ -222,7 +280,10 @@ end
 
 local function uri_totp_test()
     local uri = otp.uri(SECRET, { issuer = "App", account = "ada@example.com" })
-    assert(uri == `otpauth://totp/App:ada%40example.com?secret=$SECRET&issuer=App&algorithm=SHA1&digits=6&period=30`)
+    assert(
+        uri
+            == `otpauth://totp/App:ada%40example.com?secret=$SECRET&issuer=App&algorithm=SHA1&digits=6&period=30`
+    )
 end
 
 local function uri_escape_test()
@@ -235,14 +296,29 @@ local function uri_escape_test()
 end
 
 local function uri_options_test()
-    local uri = otp.uri(SHA1_KEY, { account = "ada", algorithm = "sha256", digits = 8, period = 60 })
+    local uri = otp.uri(
+        SHA1_KEY,
+        { account = "ada", algorithm = "sha256", digits = 8, period = 60 }
+    )
     assert(uri == `otpauth://totp/ada?secret=$SECRET&algorithm=SHA256&digits=8&period=60`)
-    local hotp = otp.uri("gezd gnbv gy3t qojq gezd gnbv gy3t qojq", { type = "hotp", account = "ada", counter = 7 })
+    local hotp = otp.uri("gezd gnbv gy3t qojq gezd gnbv gy3t qojq", {
+        type = "hotp",
+        account = "ada",
+        counter = 7,
+    })
     assert(hotp == `otpauth://hotp/ada?secret=$SECRET&algorithm=SHA1&digits=6&counter=7`)
 end
 
 local function uri_arguments_test()
-    raises(function() otp.uri(SECRET, {}) end, "needs an account")
-    raises(function() otp.uri(SECRET) end, "needs an account")
-    raises(function() otp.uri(SECRET, { account = "a", type = "x" }) end, "unknown type 'x'")
+    raises(function()
+        otp.uri(SECRET, {})
+    end, "needs an account")
+
+    raises(function()
+        otp.uri(SECRET)
+    end, "needs an account")
+
+    raises(function()
+        otp.uri(SECRET, { account = "a", type = "x" })
+    end, "unknown type 'x'")
 end

@@ -7,6 +7,25 @@
 --- already used. Secrets are base32 text, the form that authenticator
 --- apps read. `otp.uri` builds the `otpauth://` URI that a QR code encodes.
 ---
+--- The following example enrolls a forum account in two-factor sign in, then
+--- accepts each code that the user types only once.
+---
+--- ```lus nocheck
+--- local otp = require("https://atmosp.here/2.0/otp.lus")
+---
+--- -- The forum stores the secret with the account and shows the URI as a QR code.
+--- local secret = otp.secret()
+--- print(otp.uri(secret, { issuer = "Lus Forum", account = "ada@example.com" }))
+---
+--- -- A code counts only for a step after the last accepted one.
+--- local last_step = -1
+--- local offset, step = otp.verify(secret, "492039", { window = 1 })
+---
+--- if offset and step > last_step then
+---     last_step = step
+--- end
+--- ```
+---
 --- @package otp
 --- @version 1.0.0
 --- @lus 2.0
@@ -17,7 +36,10 @@ local M = {}
 
 local OtpError = {}
 OtpError.__index = OtpError
-OtpError.__tostring = function(e) return e.message end
+
+OtpError.__tostring = function(e)
+    return e.message
+end
 
 local function fail(message)
     error(setmetatable({ message = message }, OtpError), 0)
@@ -43,9 +65,11 @@ local transcode = string.transcode
 --- @return string
 function M.base32_encode(data, padding)
     local text = transcode(data, "binary", "base32")
+
     if padding then
         return text
     end
+
     return (text:gsub("=+$", ""))
 end
 
@@ -61,23 +85,31 @@ function M.base32_decode(text)
     if type(text) ~= "string" then
         error(`bad argument #1 to 'base32_decode' (string expected, got $(type(text)))`, 2)
     end
+
     if text:find("[ %-]") then
         text = text:gsub("[ %-]", "")
     end
+
     local digits = text:match("^([A-Za-z2-7]*)=*$")
+
     if digits == nil then
         local bad = text:find("[^A-Za-z2-7=]")
         local after = text:find("[A-Za-z2-7]", text:find("=", 1, true) or #text + 1)
+
         if after and (bad == nil or after < bad) then
             fail("invalid base32 character '='")
         end
+
         fail(`invalid base32 character '$(text:sub(bad, bad))'`)
     end
+
     -- A final character that completes no byte carries no data.
     local tail = #digits % 8
+
     if tail == 1 or tail == 3 or tail == 6 then
         digits = digits:sub(1, -2)
     end
+
     return transcode(digits, "base32", "binary")
 end
 
@@ -86,9 +118,11 @@ end
 --- @return string
 function M.secret(bytes)
     bytes = bytes or 20
+
     if math.type(bytes) ~= "integer" or bytes < 1 then
         error("bad argument #1 to 'secret' (positive integer expected)", 2)
     end
+
     return M.base32_encode(crypto.random(bytes))
 end
 
@@ -100,24 +134,31 @@ local POWERS = { [6] = 1000000, [7] = 10000000, [8] = 100000000 }
 local function key_of(secret)
     if type(secret) == "string" then
         local key = M.base32_decode(secret)
+
         if #key == 0 then
             fail("empty secret")
         end
+
         return key
     end
+
     return secret
 end
 
 -- Reads the options shared by every function: the algorithm and the digits.
 local function settings(options)
-    local algorithm = options and options.algorithm or "sha1"
+    local algorithm = options?.algorithm or "sha1"
+
     if ALGORITHMS[algorithm] == nil then
-        error(`unknown algorithm '$(tostring(algorithm))'`, 3)
+        error(`unknown algorithm '$algorithm'`, 3)
     end
-    local digits = options and options.digits or 6
+
+    local digits = options?.digits or 6
+
     if POWERS[digits] == nil then
         error("digits must be 6, 7, or 8", 3)
     end
+
     return algorithm, digits
 end
 
@@ -135,18 +176,22 @@ local function seconds_of(value)
     if value == nil then
         return time.now():epoch()
     end
+
     if type(value) == "number" then
         return math.floor(value)
     end
+
     return value:epoch()
 end
 
 local function step_of(options)
-    local period = options and options.period or 30
+    local period = options?.period or 30
+
     if math.type(period) ~= "integer" or period < 1 then
         error("period must be a positive integer", 3)
     end
-    return seconds_of(options and options.time) // period, period
+
+    return seconds_of(options?.time) // period, period
 end
 
 -- Leaves only the digits that a person typed, without the spaces of a
@@ -155,9 +200,11 @@ local function clean(code)
     if type(code) == "number" then
         code = tostring(code)
     end
+
     if type(code) ~= "string" then
         return nil
     end
+
     return (code:gsub("%s", ""))
 end
 
@@ -171,9 +218,11 @@ end
 --- @return string The code, with its leading zeros.
 function M.hotp(secret, counter, options)
     local algorithm, digits = settings(options)
+
     if math.type(counter) ~= "integer" or counter < 0 then
         error("bad argument #2 to 'hotp' (non-negative integer expected)", 2)
     end
+
     return generate(key_of(secret), counter, algorithm, digits)
 end
 
@@ -191,16 +240,21 @@ end
 
 local function search(key, code, first, last, center, algorithm, digits)
     local found = nil
+
     -- Every candidate is compared, so the running time is the same for a
     -- match at any offset and for no match.
     for counter = first, last do
-        if counter >= 0 and crypto.equal(generate(key, counter, algorithm, digits), code) and found == nil then
+        if counter >= 0
+            and crypto.equal(generate(key, counter, algorithm, digits), code)
+            and found == nil then
             found = counter
         end
     end
+
     if found == nil then
         return nil
     end
+
     return found - center, found
 end
 
@@ -221,15 +275,19 @@ end
 function M.verify(secret, code, options)
     local algorithm, digits = settings(options)
     local step = step_of(options)
-    local window = options and options.window or 1
+    local window = options?.window or 1
+
     if math.type(window) ~= "integer" or window < 0 then
         error("window must be a non-negative integer", 2)
     end
+
     local key = key_of(secret)
     code = clean(code)
+
     if code == nil or #code ~= digits then
         return nil
     end
+
     return search(key, code, step - window, step + window, step, algorithm, digits)
 end
 
@@ -248,18 +306,24 @@ end
 --- @return integer|nil The matching counter.
 function M.verify_hotp(secret, code, counter, options)
     local algorithm, digits = settings(options)
+
     if math.type(counter) ~= "integer" or counter < 0 then
         error("bad argument #3 to 'verify_hotp' (non-negative integer expected)", 2)
     end
-    local window = options and options.window or 0
+
+    local window = options?.window or 0
+
     if math.type(window) ~= "integer" or window < 0 then
         error("window must be a non-negative integer", 2)
     end
+
     local key = key_of(secret)
     code = clean(code)
+
     if code == nil or #code ~= digits then
         return nil
     end
+
     return search(key, code, counter, counter + window, counter, algorithm, digits)
 end
 
@@ -268,7 +332,7 @@ end
 --- @return integer A number from 1 to the period.
 function M.remaining(options)
     local step, period = step_of(options)
-    return (step + 1) * period - seconds_of(options and options.time)
+    return (step + 1) * period - seconds_of(options?.time)
 end
 
 -- URIs -------------------------------------------------------------------------
@@ -291,29 +355,38 @@ function M.uri(secret, options)
     if type(options) ~= "table" or options.account == nil then
         error("otp.uri needs an account", 2)
     end
+
     local algorithm, digits = settings(options)
     local kind = options.type or "totp"
+
     if kind ~= "totp" and kind ~= "hotp" then
-        error(`unknown type '$(tostring(kind))'`, 2)
+        error(`unknown type '$kind'`, 2)
     end
+
     local label = escape(options.account)
-    local query = { "secret=" .. M.base32_encode(key_of(secret)) }
+    local query = { `secret=$(M.base32_encode(key_of(secret)))` }
+
     if options.issuer ~= nil then
         label = `$(escape(options.issuer)):$label`
-        query[#query + 1] = "issuer=" .. escape(options.issuer)
+        query[#query + 1] = `issuer=$(escape(options.issuer))`
     end
-    query[#query + 1] = "algorithm=" .. ALGORITHMS[algorithm]
-    query[#query + 1] = "digits=" .. digits
+
+    query[#query + 1] = `algorithm=$(ALGORITHMS[algorithm])`
+    query[#query + 1] = `digits=$digits`
+
     if kind == "totp" then
         local _, period = step_of(options)
-        query[#query + 1] = "period=" .. period
+        query[#query + 1] = `period=$period`
     else
         local counter = options.counter or 0
+
         if math.type(counter) ~= "integer" or counter < 0 then
             error("counter must be a non-negative integer", 2)
         end
-        query[#query + 1] = "counter=" .. counter
+
+        query[#query + 1] = `counter=$counter`
     end
+
     return `otpauth://$kind/$label?$(table.concat(query, "&"))`
 end
 
